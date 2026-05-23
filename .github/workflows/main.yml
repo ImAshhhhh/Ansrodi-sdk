@@ -1,61 +1,40 @@
-name: ARM64 Android 16 AVD + ws‑scrcpy + Cloudflare Tunnel
+name: ARM64 Android 16 AVD on macOS + ws-scrcpy + Cloudflare
 
 on:
-  workflow_dispatch:      # manual trigger
-  # schedule: ...         # optional
+  workflow_dispatch:        # manual trigger
 
 jobs:
-  emulator-tunnel:
-    runs-on: ubuntu-24.04-arm   # GitHub-hosted ARM64 runner
-    timeout-minutes: 360        # max for public repos
+  mac-emulator:
+    runs-on: macos-14       # Apple Silicon (M1) runner
+    timeout-minutes: 360    # max for public repos (6h)
 
     env:
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/share/android-sdk
       AVD_NAME: test_avd
-      API_LEVEL: 36             # Android 16 (preview)
+      API_LEVEL: 36         # Android 16 (preview)
 
     steps:
-      - name: Check for KVM
-        id: kvm
-        run: |
-          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-            echo "KVM found, enabling hardware acceleration."
-            echo "accel=true" >> $GITHUB_OUTPUT
-          else
-            echo "No KVM – falling back to software rendering (slow)."
-            echo "accel=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Install Java (required for Android tools)
+        run: brew install openjdk@17
+      - name: Set JAVA_HOME
+        run: echo "JAVA_HOME=$(brew --prefix openjdk@17)" >> $GITHUB_ENV
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            openjdk-17-jdk \
-            unzip \
-            wget \
-            curl \
-            xvfb \
-            libpulse0
-          # Node.js 20 LTS
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-
-      - name: Set up Android SDK
+      - name: Download Android Command Line Tools
         run: |
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q commandlinetools-linux-*_latest.zip
+          curl -L https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip
           mv cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
 
-      - name: Accept Android SDK licenses
+      - name: Accept Android SDK Licenses
         run: yes | sdkmanager --licenses
 
-      - name: Install platform-tools, emulator, and system image
+      - name: Install platform-tools, emulator and ARM64 system image
         run: |
           sdkmanager "platform-tools" "emulator" "platforms;android-$API_LEVEL"
-          # Try Android 16 ARM64 image; fallback to Android 15 if unavailable
+          # Try Android 16 ARM64 image; fallback to Android 15 if not yet available
           IMG="system-images;android-$API_LEVEL;google_apis;arm64-v8a"
           if ! sdkmanager --list | grep -q "$IMG"; then
             echo "Android $API_LEVEL ARM64 image not found. Falling back to API 35."
@@ -67,57 +46,71 @@ jobs:
 
       - name: Create AVD
         run: |
-          # Use a device that supports arm64 (e.g., Pixel 6)
-          DEVICE="pixel_6"
+          DEVICE="pixel_6"   # ARM64 compatible device definition
           avdmanager create avd \
             -n $AVD_NAME \
             -k "system-images;android-$API_LEVEL;google_apis;arm64-v8a" \
-            -d "$DEVICE"
-          # Customise config for headless CI
+            -d "$DEVICE" \
+            -f
+          # Configure for headless CI
           echo "hw.keyboard=yes" >> ~/.android/avd/$AVD_NAME.avd/config.ini
           echo "hw.ramSize=2048" >> ~/.android/avd/$AVD_NAME.avd/config.ini
           echo "disk.dataPartition.size=4096M" >> ~/.android/avd/$AVD_NAME.avd/config.ini
+          # Enable hardware acceleration via Hypervisor.framework
+          echo "hw.cpu.ncore=4" >> ~/.android/avd/$AVD_NAME.avd/config.ini
+          echo "hw.gpu.mode=host" >> ~/.android/avd/$AVD_NAME.avd/config.ini
 
-      - name: Start emulator
+      - name: Start Emulator with Hypervisor acceleration
         run: |
-          ACCEL=${{ steps.kvm.outputs.accel }}
-          EMU_FLAGS="-no-window -no-audio -no-boot-anim -netdelay none -netspeed full -gpu swiftshader_indirect"
-          if [ "$ACCEL" = "true" ]; then
-            EMU_FLAGS="$EMU_FLAGS -accel on"
-          else
-            EMU_FLAGS="$EMU_FLAGS -accel off"
-          fi
-          nohup $ANDROID_SDK_ROOT/emulator/emulator -avd $AVD_NAME $EMU_FLAGS > /dev/null 2>&1 &
-          echo "Waiting for emulator to boot..."
+          $ANDROID_SDK_ROOT/emulator/emulator \
+            -avd $AVD_NAME \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -netdelay none \
+            -netspeed full \
+            -accel on \
+            -gpu swiftshader_indirect \
+            -verbose > emulator.log 2>&1 &
+          echo "Waiting for device..."
           adb wait-for-device
-          while [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]; do
+          while [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+            echo "Boot not yet complete... checking again in 5s"
             sleep 5
           done
-          echo "Emulator is ready."
+          echo "Emulator booted successfully!"
 
-      - name: Clone and install ws‑scrcpy
+      - name: Set up Node.js (for ws-scrcpy)
+        run: |
+          brew install node@20
+          echo "$(brew --prefix node@20)/bin" >> $GITHUB_PATH
+
+      - name: Clone and install ws-scrcpy
         run: |
           git clone https://github.com/NetrisTV/ws-scrcpy.git
           cd ws-scrcpy
           npm install
 
-      - name: Start Cloudflare Tunnel & ws‑scrcpy server
+      - name: Install Cloudflare Tunnel client (ARM64 macOS)
         run: |
-          # Download cloudflared
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -o cloudflared
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64 -o cloudflared
           chmod +x cloudflared
-          # Start tunnel in background, capturing the URL
+
+      - name: Start Cloudflare Tunnel and ws-scrcpy
+        run: |
+          # Start tunnel in background, capturing the trycloudflare URL
           nohup ./cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
-          # Wait for tunnel to establish and extract the URL
-          sleep 10
-          TUNNEL_URL=$(grep -oP 'https://[^ ]+\.trycloudflare\.com' tunnel.log || true)
-          if [ -z "$TUNNEL_URL" ]; then
-            TUNNEL_URL=$(grep -oP 'https://[^ ]+\.trycloudflare\.com' tunnel.log || true)
+          sleep 5
+          # Extract the URL
+          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1)
+          # Retry a few times if needed
+          for i in {1..5}; do
+            if [ -n "$TUNNEL_URL" ]; then break; fi
             sleep 5
-            TUNNEL_URL=$(grep -oP 'https://[^ ]+\.trycloudflare\.com' tunnel.log || true)
-          fi
-          echo "🌐 Access the emulator here: $TUNNEL_URL"
+            TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1)
+          done
+          echo "🌐 Access your Android emulator at: $TUNNEL_URL"
           echo "Access URL: $TUNNEL_URL" >> $GITHUB_STEP_SUMMARY
-          # Keep workflow alive by running ws‑scrcpy in foreground
+          # Keep workflow alive by running ws-scrcpy in foreground
           cd ws-scrcpy
           npm start
