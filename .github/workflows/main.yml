@@ -1,4 +1,4 @@
-name: ARM64 Android AVD (custom, software-only) + ws-scrcpy + Cloudflare
+name: ARM64 Android AVD (software, no HVF) + ws-scrcpy + Cloudflare
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     env:
       ANDROID_SDK_ROOT: /usr/local/share/android-sdk
       AVD_NAME: test_avd
-      API_LEVEL: 35             # Start stable; change to 36 once available
+      API_LEVEL: 35             # stable, change to 36 when available
       IMG_TAG: google_apis
       ABI: arm64-v8a
 
@@ -55,15 +55,15 @@ jobs:
             echo "image.sysdir.1=$IMAGE_PATH" >> "$AVD_PATH/config.ini"
           fi
 
-          # 🔥 Critical: completely disable hardware acceleration
+          # Critical: completely disable hardware acceleration
           echo "hw.cpu.accel=off" >> "$AVD_PATH/config.ini"
           echo "hw.gpu.mode=guest" >> "$AVD_PATH/config.ini"
           echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
           echo "hw.ramSize=2048" >> "$AVD_PATH/config.ini"
           echo "disk.dataPartition.size=4096M" >> "$AVD_PATH/config.ini"
-          # Do NOT set hw.cpu.ncore (leave default, single core)
+          # No hw.cpu.ncore (default single core)
 
-      - name: Boot emulator (software only, retry)
+      - name: Boot emulator (software‑only, NO HVF, retry)
         run: |
           MAX_RETRIES=2
           retry=0
@@ -74,6 +74,7 @@ jobs:
             adb -s emulator-5554 emu kill 2>/dev/null || true
             sleep 2
 
+            # ‼️ Force pure software: -no-accel + QEMU TCG
             $ANDROID_SDK_ROOT/emulator/emulator \
               -avd $AVD_NAME \
               -no-window \
@@ -81,8 +82,9 @@ jobs:
               -no-boot-anim \
               -netdelay none \
               -netspeed full \
-              -accel off \
-              -gpu guest \
+              -no-accel \
+              -gpu swiftshader_indirect \
+              -qemu -accel tcg \
               -verbose \
               -no-snapshot \
               &> emulator_boot.log &
