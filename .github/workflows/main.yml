@@ -1,28 +1,27 @@
-name: ARM64 Android AVD + ws-scrcpy + Cloudflare Tunnel
+name: ARM64 Android AVD (custom, software-only) + ws-scrcpy + Cloudflare
 
 on:
   workflow_dispatch:
 
 jobs:
-  android:
-    runs-on: macos-14
+  emulator:
+    runs-on: macos-14           # Apple Silicon
     timeout-minutes: 360
 
     env:
       ANDROID_SDK_ROOT: /usr/local/share/android-sdk
       AVD_NAME: test_avd
-      # Will try Android 16 (API 36) first, fallback to 15 if image not yet available
-      API_LEVEL: 36
+      API_LEVEL: 35             # Start stable; change to 36 once available
       IMG_TAG: google_apis
       ABI: arm64-v8a
 
     steps:
-      - name: Setup Java
-        run: |
-          brew install openjdk@17
-          echo "JAVA_HOME=$(brew --prefix openjdk@17)" >> $GITHUB_ENV
+      - name: Install Java
+        run: brew install openjdk@17
+      - name: Set JAVA_HOME
+        run: echo "JAVA_HOME=$(brew --prefix openjdk@17)" >> $GITHUB_ENV
 
-      - name: Install Android command-line tools
+      - name: Download Android Command Line Tools
         run: |
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
           curl -L https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip -o cmdline-tools.zip
@@ -30,59 +29,120 @@ jobs:
           mv cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
-      - name: Accept SDK licenses
+      - name: Accept SDK Licenses
         run: yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses
 
-      - name: Pre‑install correct ARM64 system image
+      - name: Install SDK packages (ARM64 system image)
         run: |
-          IMG="system-images;android-${API_LEVEL};${IMG_TAG};${ABI}"
-          if sdkmanager --sdk_root=$ANDROID_SDK_ROOT --list | grep -q "$IMG"; then
-            echo "Using Android ${API_LEVEL} ARM64 image"
-            sdkmanager --sdk_root=$ANDROID_SDK_ROOT "$IMG" "platforms;android-${API_LEVEL}"
+          sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
+            "platform-tools" "emulator" "platforms;android-$API_LEVEL" \
+            "system-images;android-$API_LEVEL;$IMG_TAG;$ABI"
+
+      - name: Create AVD and force software rendering
+        run: |
+          ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT avdmanager create avd \
+            -n $AVD_NAME \
+            -k "system-images;android-$API_LEVEL;$IMG_TAG;$ABI" \
+            -d "pixel_6" -f
+
+          AVD_PATH="$HOME/.android/avd/$AVD_NAME.avd"
+          IMAGE_PATH="$ANDROID_SDK_ROOT/system-images/android-$API_LEVEL/$IMG_TAG/$ABI"
+
+          # Fix image path
+          if grep -q '^image.sysdir.1=' "$AVD_PATH/config.ini"; then
+            sed -i '' "s|^image.sysdir.1=.*|image.sysdir.1=$IMAGE_PATH|" "$AVD_PATH/config.ini"
           else
-            echo "Android ${API_LEVEL} image not found, falling back to API 35"
-            echo "API_LEVEL=35" >> $GITHUB_ENV
-            sdkmanager --sdk_root=$ANDROID_SDK_ROOT "system-images;android-35;${IMG_TAG};${ABI}" "platforms;android-35"
+            echo "image.sysdir.1=$IMAGE_PATH" >> "$AVD_PATH/config.ini"
           fi
 
-      - name: Boot emulator (software rendering, no HVF)
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ env.API_LEVEL }}
-          arch: arm64-v8a
-          target: google_apis
-          force-avd-creation: true
-          avd-name: ${{ env.AVD_NAME }}
-          emulator-options: >-
-            -no-window
-            -gpu swiftshader_indirect
-            -noaudio
-            -no-boot-anim
-            -accel off
-            -netdelay none
-            -netspeed full
-            -verbose
-          script: |
-            echo "✅ Emulator is fully booted!"
-            adb shell getprop ro.build.version.sdk
+          # 🔥 Critical: completely disable hardware acceleration
+          echo "hw.cpu.accel=off" >> "$AVD_PATH/config.ini"
+          echo "hw.gpu.mode=guest" >> "$AVD_PATH/config.ini"
+          echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
+          echo "hw.ramSize=2048" >> "$AVD_PATH/config.ini"
+          echo "disk.dataPartition.size=4096M" >> "$AVD_PATH/config.ini"
+          # Do NOT set hw.cpu.ncore (leave default, single core)
 
-      - name: Install Node.js (for ws-scrcpy)
+      - name: Boot emulator (software only, retry)
+        run: |
+          MAX_RETRIES=2
+          retry=0
+          success=false
+
+          while [ $retry -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+            echo "===== Boot attempt $((retry+1))/$MAX_RETRIES ====="
+            adb -s emulator-5554 emu kill 2>/dev/null || true
+            sleep 2
+
+            $ANDROID_SDK_ROOT/emulator/emulator \
+              -avd $AVD_NAME \
+              -no-window \
+              -no-audio \
+              -no-boot-anim \
+              -netdelay none \
+              -netspeed full \
+              -accel off \
+              -gpu guest \
+              -verbose \
+              -no-snapshot \
+              &> emulator_boot.log &
+            EMU_PID=$!
+
+            # Stream boot logs live
+            tail -f emulator_boot.log &
+            TAIL_PID=$!
+
+            timeout=900
+            start=$SECONDS
+            booted=false
+
+            while [ $((SECONDS - start)) -lt $timeout ]; do
+              if adb devices | grep -q 'emulator-5554'; then
+                boot_status=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+                if [ "$boot_status" = "1" ]; then
+                  booted=true
+                  break
+                fi
+              fi
+              sleep 10
+            done
+
+            kill $TAIL_PID 2>/dev/null || true
+
+            if [ "$booted" = true ]; then
+              success=true
+              echo "✅ Emulator booted successfully (software rendering)!"
+            else
+              echo "❌ Boot timed out after $timeout seconds."
+              echo "--- Last 100 lines of emulator log ---"
+              tail -n 100 emulator_boot.log
+              kill $EMU_PID 2>/dev/null || true
+              retry=$((retry+1))
+            fi
+          done
+
+          if [ "$success" = false ]; then
+            echo "::error::Emulator failed to boot after $MAX_RETRIES attempts."
+            exit 1
+          fi
+
+      - name: Set up Node.js
         run: |
           brew install node@20
           echo "$(brew --prefix node@20)/bin" >> $GITHUB_PATH
 
-      - name: Clone & build ws-scrcpy
+      - name: Clone and install ws-scrcpy
         run: |
           git clone https://github.com/NetrisTV/ws-scrcpy.git
           cd ws-scrcpy
           npm install
 
-      - name: Download Cloudflared (ARM64)
+      - name: Download Cloudflared (ARM64 macOS)
         run: |
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64 -o cloudflared
           chmod +x cloudflared
 
-      - name: Start Cloudflare Tunnel + ws-scrcpy
+      - name: Expose emulator via Cloudflare Tunnel
         run: |
           nohup ./cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
           sleep 5
@@ -92,7 +152,7 @@ jobs:
             sleep 5
             TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1)
           done
-          echo "🌐 Access your Android here: $TUNNEL_URL"
+          echo "🌐 Access URL: $TUNNEL_URL"
           echo "Access URL: $TUNNEL_URL" >> $GITHUB_STEP_SUMMARY
           cd ws-scrcpy
           npm start
