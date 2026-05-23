@@ -5,7 +5,7 @@ on:
 
 jobs:
   emulator:
-    runs-on: macos-14           # Apple Silicon
+    runs-on: macos-14           # Apple Silicon (HVF unsupported)
     timeout-minutes: 360
 
     env:
@@ -40,13 +40,11 @@ jobs:
 
       - name: Create AVD and fix system image path
         run: |
-          # avdmanager reads ANDROID_SDK_ROOT from the environment – no --sdk_root flag
           ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT avdmanager create avd \
             -n $AVD_NAME \
             -k "system-images;android-$API_LEVEL;$IMG_TAG;$ABI" \
             -d "pixel_6" -f
 
-          # Ensure the config.ini points to the absolute system image path
           AVD_PATH="$HOME/.android/avd/$AVD_NAME.avd"
           IMAGE_PATH="$ANDROID_SDK_ROOT/system-images/android-$API_LEVEL/$IMG_TAG/$ABI"
           if grep -q '^image.sysdir.1=' "$AVD_PATH/config.ini"; then
@@ -55,17 +53,19 @@ jobs:
             echo "image.sysdir.1=$IMAGE_PATH" >> "$AVD_PATH/config.ini"
           fi
 
-          # Headless CI optimizations
           echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
           echo "hw.ramSize=2048" >> "$AVD_PATH/config.ini"
           echo "disk.dataPartition.size=4096M" >> "$AVD_PATH/config.ini"
           echo "hw.cpu.ncore=4" >> "$AVD_PATH/config.ini"
 
-      - name: Boot emulator with live logs and retry
+      - name: Boot emulator with live logs and retry (software rendering)
         run: |
           MAX_RETRIES=2
           retry=0
           success=false
+
+          # HVF is unsupported on GitHub-hosted macOS-14, so we must use software
+          ACCEL_FLAGS="-accel off -gpu swiftshader_indirect"
 
           while [ $retry -lt $MAX_RETRIES ] && [ "$success" = false ]; do
             echo "===== Boot attempt $((retry+1))/$MAX_RETRIES ====="
@@ -79,13 +79,12 @@ jobs:
               -no-boot-anim \
               -netdelay none \
               -netspeed full \
-              -accel on \
+              $ACCEL_FLAGS \
               -verbose \
               -no-snapshot \
               &> emulator_boot.log &
             EMU_PID=$!
 
-            # Stream boot logs live to the GitHub Actions console
             tail -f emulator_boot.log &
             TAIL_PID=$!
 
@@ -101,14 +100,14 @@ jobs:
                   break
                 fi
               fi
-              sleep 5
+              sleep 10
             done
 
             kill $TAIL_PID 2>/dev/null || true
 
             if [ "$booted" = true ]; then
               success=true
-              echo "✅ Emulator booted successfully!"
+              echo "✅ Emulator booted successfully (software rendering)!"
             else
               echo "❌ Boot timed out after $timeout seconds."
               echo "--- Last 100 lines of emulator log ---"
