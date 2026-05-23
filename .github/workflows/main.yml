@@ -1,4 +1,4 @@
-name: ARM64 Android AVD (stable 15) + ws-scrcpy + Cloudflare (Live Logs)
+name: ARM64 Android AVD (stable 15) + ws-scrcpy + Cloudflare
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     env:
       ANDROID_SDK_ROOT: /usr/local/share/android-sdk
       AVD_NAME: test_avd
-      API_LEVEL: 35             # Stable, change to 36 when ready
+      API_LEVEL: 35
       IMG_TAG: google_apis
       ABI: arm64-v8a
 
@@ -28,29 +28,39 @@ jobs:
           unzip -q cmdline-tools.zip
           mv cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
 
       - name: Accept SDK Licenses
-        run: yes | sdkmanager --licenses
+        run: yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses
 
-      - name: Install SDK packages (stable ARM64)
+      - name: Install SDK packages (explicit SDK root)
         run: |
-          sdkmanager "platform-tools" "emulator" "platforms;android-$API_LEVEL" \
+          sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
+            "platform-tools" "emulator" "platforms;android-$API_LEVEL" \
             "system-images;android-$API_LEVEL;$IMG_TAG;$ABI"
 
-      - name: Create AVD
+      - name: Create AVD and fix system image path
         run: |
-          avdmanager create avd \
+          avdmanager --sdk_root=$ANDROID_SDK_ROOT create avd \
             -n $AVD_NAME \
             -k "system-images;android-$API_LEVEL;$IMG_TAG;$ABI" \
             -d "pixel_6" -f
-          # Headless-friendly config
-          echo "hw.keyboard=yes" >> ~/.android/avd/$AVD_NAME.avd/config.ini
-          echo "hw.ramSize=2048" >> ~/.android/avd/$AVD_NAME.avd/config.ini
-          echo "disk.dataPartition.size=4096M" >> ~/.android/avd/$AVD_NAME.avd/config.ini
-          echo "hw.cpu.ncore=4" >> ~/.android/avd/$AVD_NAME.avd/config.ini
 
-      - name: Boot emulator with live log output & retry
+          # Patch config.ini to use the correct absolute image path
+          AVD_PATH="$HOME/.android/avd/$AVD_NAME.avd"
+          IMAGE_PATH="$ANDROID_SDK_ROOT/system-images/android-$API_LEVEL/$IMG_TAG/$ABI"
+          if grep -q '^image.sysdir.1=' "$AVD_PATH/config.ini"; then
+            sed -i '' "s|^image.sysdir.1=.*|image.sysdir.1=$IMAGE_PATH|" "$AVD_PATH/config.ini"
+          else
+            echo "image.sysdir.1=$IMAGE_PATH" >> "$AVD_PATH/config.ini"
+          fi
+
+          # Additional headless settings
+          echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
+          echo "hw.ramSize=2048" >> "$AVD_PATH/config.ini"
+          echo "disk.dataPartition.size=4096M" >> "$AVD_PATH/config.ini"
+          echo "hw.cpu.ncore=4" >> "$AVD_PATH/config.ini"
+
+      - name: Boot emulator with live logs and retry
         run: |
           MAX_RETRIES=2
           retry=0
@@ -58,11 +68,9 @@ jobs:
 
           while [ $retry -lt $MAX_RETRIES ] && [ "$success" = false ]; do
             echo "===== Boot attempt $((retry+1))/$MAX_RETRIES ====="
-            # Kill any leftover emulator
             adb -s emulator-5554 emu kill 2>/dev/null || true
             sleep 2
 
-            # Start emulator with verbose logging to a file
             $ANDROID_SDK_ROOT/emulator/emulator \
               -avd $AVD_NAME \
               -no-window \
@@ -76,11 +84,9 @@ jobs:
               &> emulator_boot.log &
             EMU_PID=$!
 
-            # Tail the log in background so we see real-time output in the runner log
             tail -f emulator_boot.log &
             TAIL_PID=$!
 
-            # Wait for boot completion (timeout 15 minutes)
             timeout=900
             start=$SECONDS
             booted=false
@@ -91,15 +97,11 @@ jobs:
                 if [ "$boot_status" = "1" ]; then
                   booted=true
                   break
-                else
-                  sleep 5
                 fi
-              else
-                sleep 5
               fi
+              sleep 5
             done
 
-            # Clean up tail process
             kill $TAIL_PID 2>/dev/null || true
 
             if [ "$booted" = true ]; then
@@ -107,9 +109,6 @@ jobs:
               echo "✅ Emulator booted successfully!"
             else
               echo "❌ Boot timed out after $timeout seconds."
-              echo "Full emulator log is shown above (via tail)."
-              # Optionally dump last 100 lines explicitly
-              echo "--- Last 100 lines of emulator_boot.log (repeated for convenience) ---"
               tail -n 100 emulator_boot.log
               kill $EMU_PID 2>/dev/null || true
               retry=$((retry+1))
