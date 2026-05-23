@@ -1,4 +1,4 @@
-name: ARM64 Android AVD (stable 15) + ws-scrcpy + Cloudflare
+name: ARM64 Android AVD (stable) + ws-scrcpy + Cloudflare
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
       - name: Accept SDK Licenses
         run: yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses
 
-      - name: Install SDK packages (explicit SDK root)
+      - name: Install SDK packages
         run: |
           sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
             "platform-tools" "emulator" "platforms;android-$API_LEVEL" \
@@ -40,12 +40,13 @@ jobs:
 
       - name: Create AVD and fix system image path
         run: |
-          avdmanager --sdk_root=$ANDROID_SDK_ROOT create avd \
+          # avdmanager reads ANDROID_SDK_ROOT from the environment – no --sdk_root flag
+          ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT avdmanager create avd \
             -n $AVD_NAME \
             -k "system-images;android-$API_LEVEL;$IMG_TAG;$ABI" \
             -d "pixel_6" -f
 
-          # Patch config.ini to use the correct absolute image path
+          # Ensure the config.ini points to the absolute system image path
           AVD_PATH="$HOME/.android/avd/$AVD_NAME.avd"
           IMAGE_PATH="$ANDROID_SDK_ROOT/system-images/android-$API_LEVEL/$IMG_TAG/$ABI"
           if grep -q '^image.sysdir.1=' "$AVD_PATH/config.ini"; then
@@ -54,7 +55,7 @@ jobs:
             echo "image.sysdir.1=$IMAGE_PATH" >> "$AVD_PATH/config.ini"
           fi
 
-          # Additional headless settings
+          # Headless CI optimizations
           echo "hw.keyboard=yes" >> "$AVD_PATH/config.ini"
           echo "hw.ramSize=2048" >> "$AVD_PATH/config.ini"
           echo "disk.dataPartition.size=4096M" >> "$AVD_PATH/config.ini"
@@ -84,6 +85,7 @@ jobs:
               &> emulator_boot.log &
             EMU_PID=$!
 
+            # Stream boot logs live to the GitHub Actions console
             tail -f emulator_boot.log &
             TAIL_PID=$!
 
@@ -109,6 +111,7 @@ jobs:
               echo "✅ Emulator booted successfully!"
             else
               echo "❌ Boot timed out after $timeout seconds."
+              echo "--- Last 100 lines of emulator log ---"
               tail -n 100 emulator_boot.log
               kill $EMU_PID 2>/dev/null || true
               retry=$((retry+1))
