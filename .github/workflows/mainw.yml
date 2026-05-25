@@ -20,6 +20,35 @@ jobs:
           # Verify installation
           cloudflared --version
 
+      - name: Setup SSH server with user ash
+        run: |
+          # Install and start SSH server
+          sudo apt update
+          sudo apt install -y openssh-server
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
+          
+          # Create user 'ash' with home directory
+          sudo useradd -m -s /bin/bash ash
+          
+          # Set password for user 'ash' to 'root'
+          echo 'ash:root' | sudo chpasswd
+          
+          # Add user to sudo group (optional)
+          sudo usermod -aG sudo ash
+          
+          # Ensure SSH allows password authentication
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          
+          # Restart SSH to apply changes
+          sudo systemctl restart ssh
+          
+          # Verify SSH is running
+          sudo systemctl status ssh --no-pager
+          
+          echo "SSH user 'ash' created with password 'root'"
+
       - name: Create tunnel service with token
         run: |
           # Install the service with your token
@@ -35,10 +64,14 @@ jobs:
 
       - name: Keep tunnel alive
         run: |
-          echo "Cloudflared tunnel is running..."
+          echo "========================================="
+          echo "SSH Tunnel is running!"
+          echo "Connect with: ssh ash@sshh.iamash.qzz.io"
+          echo "Password: root"
+          echo "========================================="
+          echo ""
           echo "Showing recent logs:"
           sudo journalctl -u cloudflared --no-pager -n 20
           
           # Keep the workflow running (GitHub limits: max 6 hours)
-          # For 24/7, use a self-hosted runner instead
           sleep 6h
