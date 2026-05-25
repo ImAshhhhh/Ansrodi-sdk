@@ -1,0 +1,44 @@
+name: Run Cloudflared SSH Tunnel
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:              # Or trigger on push
+  schedule:          # Or scheduled (cron)
+    - cron: '0 */6 * * *'  # Every 6 hours
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-24.04-arm  # Linux ARM64 runner
+    steps:
+      - name: Install cloudflared
+        run: |
+          # Download cloudflared for ARM64
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
+          chmod +x cloudflared-linux-arm64
+          sudo mv cloudflared-linux-arm64 /usr/local/bin/cloudflared
+          
+          # Verify installation
+          cloudflared --version
+
+      - name: Create tunnel service with token
+        run: |
+          # Install the service with your token
+          sudo cloudflared service install eyJhIjoiY2U5MWFiYmQyYWU3YjhlZjQxMmU0YWQxODJmYzUxYzciLCJ0IjoiMzYwNDk1MzYtMGQzYS00MjQ0LWEyMDQtODBkYjM4ODRmZjIzIiwicyI6Ik56UXdPREptWkdVdE9HTXhNeTAwTVRkbUxXRTBOamd0TURnMVpUSXpNV0V5TlRBeCJ9
+          
+          # Enable and start the service
+          sudo systemctl enable cloudflared
+          sudo systemctl start cloudflared
+          
+          # Check status
+          sleep 3
+          sudo systemctl status cloudflared --no-pager
+
+      - name: Keep tunnel alive
+        run: |
+          echo "Cloudflared tunnel is running..."
+          echo "Showing recent logs:"
+          sudo journalctl -u cloudflared --no-pager -n 20
+          
+          # Keep the workflow running (GitHub limits: max 6 hours)
+          # For 24/7, use a self-hosted runner instead
+          sleep 6h
