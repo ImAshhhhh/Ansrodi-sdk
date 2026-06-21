@@ -8,7 +8,7 @@ on:
 
 jobs:
   tunnel:
-    runs-on: ubuntu-slim  # Linux ARM64 runner
+    runs-on: ubuntu-latest # Linux ARM64 runner
     steps:
       - name: Install cloudflared
         run: |
